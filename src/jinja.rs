@@ -111,20 +111,9 @@ pub fn preprocess_for_parsing(text: &str) -> String {
     });
     
     // Generic {{ ... }} that wasn't caught by ref/source.
+    // We replace with whitespace to avoid interference with SQL syntax.
     let result = re_generic_jinja().replace_all(&result, |caps: &Captures| {
-         let full_match = &caps[0];
-         let desired_ident = "__DBT_EXPR";
-         if desired_ident.len() > full_match.len() {
-              // fallback to comment
-              if full_match.len() >= 4 {
-                  format!("/*{}*/", " ".repeat(full_match.len()-4))
-              } else {
-                  " ".repeat(full_match.len())
-              }
-         } else {
-              let padding = " ".repeat(full_match.len() - desired_ident.len());
-              format!("{}{}", desired_ident, padding)
-         }
+         " ".repeat(caps[0].len())
     });
 
     result.to_string()

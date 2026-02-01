@@ -254,8 +254,29 @@ impl LanguageServer for Backend {
 
     async fn completion(&self, _params: CompletionParams) -> Result<Option<CompletionResponse>> {
         let manifest = self.state.manifest.read().await;
+        let mut items = Vec::new();
+
+        // 1. Keyword Snippets
+        items.push(CompletionItem {
+            label: "ref".to_string(),
+            kind: Some(CompletionItemKind::SNIPPET),
+            insert_text: Some("{{ ref('$1') }}".to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            detail: Some("Expand to ref() tag".to_string()),
+            ..CompletionItem::default()
+        });
+
+        items.push(CompletionItem {
+            label: "source".to_string(),
+            kind: Some(CompletionItemKind::SNIPPET),
+            insert_text: Some("{{ source('$1', '$2') }}".to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            detail: Some("Expand to source() tag".to_string()),
+            ..CompletionItem::default()
+        });
+
+        // 2. Model names from manifest
         if let Some(manifest) = manifest.as_ref() {
-            let mut items = Vec::new();
             for model_ref in manifest.models.iter() {
                 items.push(CompletionItem {
                     label: model_ref.key().clone(),
@@ -264,9 +285,9 @@ impl LanguageServer for Backend {
                     ..CompletionItem::default()
                 });
             }
-            return Ok(Some(CompletionResponse::Array(items)));
         }
-        Ok(None)
+        
+        Ok(Some(CompletionResponse::Array(items)))
     }
 }
 
