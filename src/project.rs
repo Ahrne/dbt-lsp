@@ -85,7 +85,11 @@ impl ProjectManifest {
             let full_path = self.root_dir.join(path);
             eprintln!("Scanning seeds in: {:?}", full_path);
             for entry in WalkDir::new(full_path).into_iter().filter_map(|e| e.ok()) {
-                if entry.path().extension().map_or(false, |ext| ext == "csv") {
+                let matches_csv = entry.path().extension().map_or(false, |ext| {
+                    let ext_str = ext.to_string_lossy().to_lowercase();
+                    ext_str == "csv"
+                });
+                if matches_csv {
                     if let Some(stem) = entry.path().file_stem() {
                         let seed_name = stem.to_string_lossy().to_string();
                         self.seeds.insert(seed_name, entry.path().to_path_buf());
