@@ -12,14 +12,34 @@ pub fn validate_refs(
     manifest: Option<&ProjectManifest>,
     rope: &Rope,
     _tree: Option<&tree_sitter::Tree>,
-) -> Vec<Diagnostic> {
+) -> (Vec<Diagnostic>, std::collections::HashMap<String, crate::state::CteDefinition>) {
     let mut diagnostics = Vec::new();
+    let mut ctes = std::collections::HashMap::new();
     
     // 1. Syntax Errors from sqlparser-rs
     // Skip syntax validation for macro files (they aren't pure SQL)
     let text = rope.to_string();
     if crate::jinja::is_macro_file(&text) {
-        return diagnostics;
+        return (diagnostics, ctes);
+    }
+    
+    // Scan for CTE definitions: "name as ("
+    static RE_CTE: OnceLock<Regex> = OnceLock::new();
+    let re_cte = RE_CTE.get_or_init(|| Regex::new(r#"(?i)\b([a-zA-Z0-9_]+)\s+as\s*\("#).unwrap());
+    
+    for cap in re_cte.captures_iter(&text) {
+        if let Some(m) = cap.get(1) {
+             let name = m.as_str().to_string();
+             let start_body = cap.get(0).unwrap().end(); // Position after "name as ("
+             
+             // Find matching closing parenthesis
+             if let Some(end_body) = find_closing_paren(&text, start_body) {
+                 ctes.insert(name, crate::state::CteDefinition {
+                     name_range: m.range(),
+                     body_range: start_body..end_body,
+                 });
+             }
+        }
     }
 
     let preprocessed = crate::jinja::preprocess_for_parsing(&text);
@@ -68,7 +88,7 @@ pub fn validate_refs(
         }
     }
 
-    diagnostics
+    (diagnostics, ctes)
 }
 
 fn parse_sqlparser_error(err: sqlparser::parser::ParserError, _rope: &Rope) -> Option<Diagnostic> {
@@ -94,4 +114,31 @@ fn parse_sqlparser_error(err: sqlparser::parser::ParserError, _rope: &Rope) -> O
         source: Some("sqlparser".to_string()),
         ..Diagnostic::default()
     })
+}
+
+fn find_closing_paren(text: &str, start_idx: usize) -> Option<usize> {
+    let mut depth = 1;
+    let mut in_quote = None;
+    let mut chars = text[start_idx..].char_indices();
+    
+    while let Some((idx, c)) = chars.next() {
+        if let Some(q) = in_quote {
+            if c == q {
+                in_quote = None;
+            }
+        } else {
+            match c {
+                '\'' | '"' => in_quote = Some(c),
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(start_idx + idx);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    None
 }

@@ -7,11 +7,18 @@ use ropey::Rope;
 use tree_sitter::Tree;
 use tower_lsp::lsp_types::{Url, Diagnostic};
 
+#[derive(Debug, Clone)]
+pub struct CteDefinition {
+    pub name_range: std::ops::Range<usize>,
+    pub body_range: std::ops::Range<usize>,
+}
+
 #[derive(Debug)]
 pub struct DocumentState {
     pub text: Rope,
     pub tree: Option<Tree>,
     pub refs: Vec<(DbtRef, std::ops::Range<usize>)>,
+    pub ctes: std::collections::HashMap<String, CteDefinition>,
     pub diagnostics: Vec<Diagnostic>,
 }
 

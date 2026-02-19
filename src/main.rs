@@ -96,13 +96,14 @@ impl LanguageServer for Backend {
 
         // 5. Generate and Publish Diagnostics
         let manifest_guard = self.state.manifest.read().await;
-        let diagnostics = crate::diagnostics::validate_refs(&refs, manifest_guard.as_deref(), &rope, tree.as_ref());
+        let (diagnostics, ctes) = crate::diagnostics::validate_refs(&refs, manifest_guard.as_deref(), &rope, tree.as_ref());
         
         // 4. Update State
         self.state.documents.insert(uri.clone(), crate::state::DocumentState {
             text: rope.clone(),
             tree,
             refs: refs.clone(),
+            ctes,
             diagnostics: Vec::new(), 
         });
 
@@ -156,11 +157,12 @@ impl LanguageServer for Backend {
              
              // 5. Generate and Publish Diagnostics
              let manifest_guard = self.state.manifest.read().await;
-             let diagnostics = crate::diagnostics::validate_refs(&refs, manifest_guard.as_deref(), &rope, tree.as_ref());
+             let (diagnostics, ctes) = crate::diagnostics::validate_refs(&refs, manifest_guard.as_deref(), &rope, tree.as_ref());
              
              if let Some(mut doc) = self.state.documents.get_mut(&uri) {
                  doc.tree = tree;
                  doc.refs = refs.clone();
+                 doc.ctes = ctes;
              }
 
              self.client.publish_diagnostics(uri, diagnostics, None).await;
@@ -191,6 +193,26 @@ impl LanguageServer for Backend {
              let byte_idx = doc.text.char_to_byte(char_idx);
 
              self.client.log_message(MessageType::INFO, format!("Byte idx: {}. Refs: {}", byte_idx, doc.refs.len())).await;
+
+             // 1. Check for CTEs (local definitions)
+             if let Some(word) = get_word_at_pos(&doc.text, char_idx) {
+                 if let Some(cte_def) = doc.ctes.get(&word) {
+                     let range = &cte_def.name_range;
+                     let start_line = doc.text.byte_to_line(range.start);
+                     let start_char = range.start - doc.text.line_to_byte(start_line);
+                     let end_line = doc.text.byte_to_line(range.end);
+                     let end_char = range.end - doc.text.line_to_byte(end_line);
+                     
+                     self.client.log_message(MessageType::INFO, format!("Found CTE definition: {}", word)).await;
+                     return Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                         uri: uri.clone(),
+                         range: Range {
+                             start: Position::new(start_line as u32, start_char as u32),
+                             end: Position::new(end_line as u32, end_char as u32),
+                         },
+                     })));
+                 }
+             }
 
              for (dbt_ref, range) in &doc.refs {
                  // Use < range.end to avoid character-after-match hits
@@ -266,6 +288,19 @@ impl LanguageServer for Backend {
              let char_idx = doc.text.line_to_char(position.line as usize) + position.character as usize;
              let byte_idx = doc.text.char_to_byte(char_idx);
              eprintln!("HOVER DEBUG: byte_idx={}, refs={}", byte_idx, doc.refs.len());
+
+             if let Some(word) = get_word_at_pos(&doc.text, char_idx) {
+                 if let Some(cte_def) = doc.ctes.get(&word) {
+                     let body_slice = doc.text.slice(cte_def.body_range.clone());
+                     return Ok(Some(Hover {
+                         contents: HoverContents::Markup(MarkupContent {
+                             kind: MarkupKind::Markdown,
+                             value: format!("```sql\n{}\n```", body_slice),
+                         }),
+                         range: None,
+                     }));
+                 }
+             }
 
              for (dbt_ref, range) in &doc.refs {
                  if byte_idx >= range.start && byte_idx < range.end {
@@ -352,6 +387,35 @@ impl LanguageServer for Backend {
         
         Ok(Some(CompletionResponse::Array(items)))
     }
+}
+
+fn get_word_at_pos(rope: &ropey::Rope, char_idx: usize) -> Option<String> {
+    let len = rope.len_chars();
+    if char_idx >= len { return None; }
+    
+    // Scan backwards
+    let mut start = char_idx;
+    while start > 0 {
+        let c = rope.char(start - 1);
+        if !c.is_alphanumeric() && c != '_' {
+            break;
+        }
+        start -= 1;
+    }
+    
+    // Scan forwards
+    let mut end = char_idx;
+    while end < len {
+        let c = rope.char(end);
+        if !c.is_alphanumeric() && c != '_' {
+            break;
+        }
+        end += 1;
+    }
+    
+    if start == end { return None; }
+    
+    Some(rope.slice(start..end).to_string())
 }
 
 #[tokio::main]
