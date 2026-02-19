@@ -96,7 +96,7 @@ impl LanguageServer for Backend {
 
         // 5. Generate and Publish Diagnostics
         let manifest_guard = self.state.manifest.read().await;
-        let (diagnostics, ctes) = crate::diagnostics::validate_refs(&refs, manifest_guard.as_deref(), &rope, tree.as_ref());
+        let (diagnostics, ctes, aliases) = crate::diagnostics::validate_refs(&refs, manifest_guard.as_deref(), &rope, tree.as_ref());
         
         // 4. Update State
         self.state.documents.insert(uri.clone(), crate::state::DocumentState {
@@ -104,6 +104,7 @@ impl LanguageServer for Backend {
             tree,
             refs: refs.clone(),
             ctes,
+            aliases,
             diagnostics: Vec::new(), 
         });
 
@@ -157,12 +158,13 @@ impl LanguageServer for Backend {
              
              // 5. Generate and Publish Diagnostics
              let manifest_guard = self.state.manifest.read().await;
-             let (diagnostics, ctes) = crate::diagnostics::validate_refs(&refs, manifest_guard.as_deref(), &rope, tree.as_ref());
+             let (diagnostics, ctes, aliases) = crate::diagnostics::validate_refs(&refs, manifest_guard.as_deref(), &rope, tree.as_ref());
              
              if let Some(mut doc) = self.state.documents.get_mut(&uri) {
                  doc.tree = tree;
                  doc.refs = refs.clone();
                  doc.ctes = ctes;
+                 doc.aliases = aliases;
              }
 
              self.client.publish_diagnostics(uri, diagnostics, None).await;
@@ -290,6 +292,7 @@ impl LanguageServer for Backend {
              eprintln!("HOVER DEBUG: byte_idx={}, refs={}", byte_idx, doc.refs.len());
 
              if let Some(word) = get_word_at_pos(&doc.text, char_idx) {
+                 // 1. Check if word is a CTE name
                  if let Some(cte_def) = doc.ctes.get(&word) {
                      let body_slice = doc.text.slice(cte_def.body_range.clone());
                      return Ok(Some(Hover {
@@ -299,6 +302,32 @@ impl LanguageServer for Backend {
                          }),
                          range: None,
                      }));
+                 }
+                 
+                 // 2. Check if word is an Alias
+                 if let Some(alias_def) = doc.aliases.get(&word) {
+                     // Resolve target
+                     if let Some(cte_def) = doc.ctes.get(&alias_def.target_name) {
+                         // Alias points to a CTE -> show CTE body
+                         let body_slice = doc.text.slice(cte_def.body_range.clone());
+                         return Ok(Some(Hover {
+                             contents: HoverContents::Markup(MarkupContent {
+                                 kind: MarkupKind::Markdown,
+                                 value: format!("**Alias for CTE** `{}`\n```sql\n{}\n```", alias_def.target_name, body_slice),
+                             }),
+                             range: None,
+                         }));
+                     } else {
+                         // Alias points to something else (source/seed/model) -> show definition line
+                         let source_slice = doc.text.slice(alias_def.reference_range.clone());
+                          return Ok(Some(Hover {
+                             contents: HoverContents::Markup(MarkupContent {
+                                 kind: MarkupKind::Markdown,
+                                 value: format!("**Alias Definition**:\n```sql\n{}\n```", source_slice),
+                             }),
+                             range: None,
+                         }));
+                     }
                  }
              }
 

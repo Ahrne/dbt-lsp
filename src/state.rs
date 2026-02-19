@@ -13,12 +13,19 @@ pub struct CteDefinition {
     pub body_range: std::ops::Range<usize>,
 }
 
+#[derive(Debug, Clone)]
+pub struct AliasDefinition {
+    pub reference_range: std::ops::Range<usize>,
+    pub target_name: String,
+}
+
 #[derive(Debug)]
 pub struct DocumentState {
     pub text: Rope,
     pub tree: Option<Tree>,
     pub refs: Vec<(DbtRef, std::ops::Range<usize>)>,
     pub ctes: std::collections::HashMap<String, CteDefinition>,
+    pub aliases: std::collections::HashMap<String, AliasDefinition>,
     pub diagnostics: Vec<Diagnostic>,
 }
 

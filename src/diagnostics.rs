@@ -12,17 +12,18 @@ pub fn validate_refs(
     manifest: Option<&ProjectManifest>,
     rope: &Rope,
     _tree: Option<&tree_sitter::Tree>,
-) -> (Vec<Diagnostic>, std::collections::HashMap<String, crate::state::CteDefinition>) {
+) -> (Vec<Diagnostic>, std::collections::HashMap<String, crate::state::CteDefinition>, std::collections::HashMap<String, crate::state::AliasDefinition>) {
     let mut diagnostics = Vec::new();
     let mut ctes = std::collections::HashMap::new();
+    let mut aliases = std::collections::HashMap::new();
     
     // 1. Syntax Errors from sqlparser-rs
     // Skip syntax validation for macro files (they aren't pure SQL)
     let text = rope.to_string();
     if crate::jinja::is_macro_file(&text) {
-        return (diagnostics, ctes);
+        return (diagnostics, ctes, aliases);
     }
-    
+
     // Scan for CTE definitions: "name as ("
     static RE_CTE: OnceLock<Regex> = OnceLock::new();
     let re_cte = RE_CTE.get_or_init(|| Regex::new(r#"(?i)\b([a-zA-Z0-9_]+)\s+as\s*\("#).unwrap());
@@ -30,15 +31,38 @@ pub fn validate_refs(
     for cap in re_cte.captures_iter(&text) {
         if let Some(m) = cap.get(1) {
              let name = m.as_str().to_string();
-             let start_body = cap.get(0).unwrap().end(); // Position after "name as ("
-             
-             // Find matching closing parenthesis
+             let start_body = cap.get(0).unwrap().end(); 
              if let Some(end_body) = find_closing_paren(&text, start_body) {
                  ctes.insert(name, crate::state::CteDefinition {
                      name_range: m.range(),
                      body_range: start_body..end_body,
                  });
              }
+        }
+    }
+
+    // Scan for table aliases: "from/join ... as alias"
+    static RE_ALIAS: OnceLock<Regex> = OnceLock::new();
+    let re_alias = RE_ALIAS.get_or_init(|| Regex::new(r#"(?ix)(?:from|join)\s+(?P<source>(?:[a-zA-Z0-9_\.]+|\{\{.*?\}\}|\$\{.*?\})+)\s+(?:as\s+)?(?P<alias>[a-zA-Z0-9_]+)"#).unwrap());
+
+    for cap in re_alias.captures_iter(&text) {
+        if let Some(alias_match) = cap.name("alias") {
+            let alias = alias_match.as_str().to_string();
+            let lower_alias = alias.to_lowercase();
+            // Filter keywords
+            if matches!(lower_alias.as_str(), "on" | "where" | "group" | "order" | "limit" | "having" | "window" | "inner" | "left" | "right" | "full" | "cross" | "outer") {
+                continue;
+            }
+            if let Some(source_match) = cap.name("source") {
+                if let Some(full_match) = cap.get(0) {
+                     let source_text = source_match.as_str();
+                     let target_name = extract_target_name(source_text);
+                     aliases.insert(alias, crate::state::AliasDefinition {
+                         reference_range: source_match.range(), // Point to "source" (e.g. "{{ ref(...) }}") not full "from ... w"
+                         target_name,
+                     });
+                }
+            }
         }
     }
 
@@ -88,7 +112,7 @@ pub fn validate_refs(
         }
     }
 
-    (diagnostics, ctes)
+    (diagnostics, ctes, aliases)
 }
 
 fn parse_sqlparser_error(err: sqlparser::parser::ParserError, _rope: &Rope) -> Option<Diagnostic> {
@@ -141,4 +165,23 @@ fn find_closing_paren(text: &str, start_idx: usize) -> Option<usize> {
         }
     }
     None
+}
+
+fn extract_target_name(source: &str) -> String {
+    static RE_REF: OnceLock<Regex> = OnceLock::new();
+    let re_ref = RE_REF.get_or_init(|| Regex::new(r#"(?x)(?:ref|source)\s*\(\s*['"]([^'"]+)['"](?:\s*,\s*['"]([^'"]+)['"])?\s*\)"#).unwrap());
+    
+    if let Some(cap) = re_ref.captures(source) {
+        if let Some(m2) = cap.get(2) {
+             // source('pkg', 'table') -> pkg.table
+             return format!("{}.{}", cap.get(1).unwrap().as_str(), m2.as_str());
+        } else if let Some(m1) = cap.get(1) {
+             // ref('table') -> table
+             return m1.as_str().to_string();
+        }
+    }
+    
+    // Fallback: cleaning up potential jinja braces or quotes for simple identifiers
+    let cleaned = source.replace("{{", "").replace("}}", "").trim().to_string();
+    cleaned.trim_matches(|c| c == '"' || c == '`').to_string()
 }
