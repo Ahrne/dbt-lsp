@@ -96,6 +96,15 @@ pub fn preprocess_for_parsing(text: &str) -> String {
         }
     });
 
+
+    // Handle {{ this }} specifically, preserving length but making it a valid identifier or empty
+    static RE_THIS: OnceLock<Regex> = OnceLock::new();
+    let re_this = RE_THIS.get_or_init(|| Regex::new(r"(?i)\{\{\s*this\s*\}\}").unwrap());
+    let result = re_this.replace_all(&result, |caps: &Captures| {
+        // preserve length: {{ this }} -> ________
+        preserve_newlines_replace(&caps[0])
+    });
+
     let result = re_jinja_block().replace_all(&result, |caps: &Captures| {
        preserve_newlines_replace(&caps[0])
     });
@@ -104,6 +113,16 @@ pub fn preprocess_for_parsing(text: &str) -> String {
         preserve_newlines_replace(&caps[0])
     });
     
+    // Handle # comments (which might confuse sqlparser if not strictly BigQuery mode or if placed weirdly)
+    // We replace # with -- to keep it as a comment but safer for standard SQL parsers if needed
+    // OR just replace with spaces if we want to ignore them.
+    // Let's replace with spaces to be safe and preserve layout.
+    static RE_HASH_COMMENT: OnceLock<Regex> = OnceLock::new();
+    let re_hash_comment = RE_HASH_COMMENT.get_or_init(|| Regex::new(r"(?m)^\s*#.*$|(?m)\s+#.*$").unwrap());
+    let result = re_hash_comment.replace_all(&result, |caps: &Captures| {
+         preserve_newlines_replace(&caps[0])
+    });
+
     let result = re_generic_jinja().replace_all(&result, |caps: &Captures| {
          preserve_newlines_replace(&caps[0])
     });

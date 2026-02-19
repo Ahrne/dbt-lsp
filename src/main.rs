@@ -329,6 +329,42 @@ impl LanguageServer for Backend {
                          }));
                      }
                  }
+                 
+                 // 3. Fallback: Check for alias.column pattern
+                 if char_idx > 0 {
+                      // find start of current word
+                      let mut s = char_idx;
+                      while s > 0 {
+                          let c = doc.text.char(s - 1);
+                          if !c.is_alphanumeric() && c != '_' { break; }
+                          s -= 1;
+                      }
+                      
+                      // Check for dot before word
+                      if s > 0 && doc.text.char(s - 1) == '.' {
+                           // Extract previous word (the alias)
+                            if let Some(alias) = get_word_at_pos(&doc.text, s - 2) {
+                                 if let Some(alias_def) = doc.aliases.get(&alias) {
+                                     // Found alias! Resolve it.
+                                     let target_desc = if let Some(cte_def) = doc.ctes.get(&alias_def.target_name) {
+                                          let body_slice = doc.text.slice(cte_def.body_range.clone());
+                                          format!("**Column of CTE** `{}` (alias `{}`)\n```sql\n{}\n```", alias_def.target_name, alias, body_slice)
+                                     } else {
+                                          let source_slice = doc.text.slice(alias_def.reference_range.clone());
+                                          format!("**Column of Source** (alias `{}`)\n```sql\n{}\n```", alias, source_slice)
+                                     };
+                                     
+                                     return Ok(Some(Hover {
+                                         contents: HoverContents::Markup(MarkupContent {
+                                             kind: MarkupKind::Markdown,
+                                             value: target_desc,
+                                         }),
+                                         range: None,
+                                     }));
+                                 }
+                            }
+                      }
+                 }
              }
 
              for (dbt_ref, range) in &doc.refs {
