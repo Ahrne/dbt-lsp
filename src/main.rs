@@ -206,16 +206,49 @@ impl LanguageServer for Backend {
                                            uri: target_uri,
                                            range: Range::default(),
                                        })));
+                                   } else if let Some(path) = manifest.seeds.get(name) {
+                                       let target_uri = Url::from_file_path(path.value()).unwrap();
+                                       return Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                                           uri: target_uri,
+                                           range: Range::default(),
+                                       })));
                                    } else {
-                                       self.client.show_message(MessageType::WARNING, format!("Model '{}' not found in project manifest", name)).await;
+                                       self.client.show_message(MessageType::WARNING, format!("Model/Seed '{}' not found in project manifest", name)).await;
                                    }
                                } else {
                                    self.client.show_message(MessageType::ERROR, "Project manifest not loaded!").await;
                                }
                           },
                           crate::jinja::DbtRef::Source(src, tbl) => {
-                               self.client.show_message(MessageType::INFO, format!("Source: {}.{}", src, tbl)).await;
-                          } 
+                               let manifest = self.state.manifest.read().await;
+                               if let Some(manifest) = manifest.as_ref() {
+                                   let full_name = format!("{}.{}", src, tbl);
+                                   if let Some(path) = manifest.sources.get(&full_name) {
+                                       let target_uri = Url::from_file_path(path.value()).unwrap();
+                                       return Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                                           uri: target_uri,
+                                           range: Range::default(),
+                                       })));
+                                   } else {
+                                       self.client.show_message(MessageType::WARNING, format!("Source '{}.{}' not found in manifest", src, tbl)).await;
+                                   }
+                               }
+                          },
+                          crate::jinja::DbtRef::Macro(name) => {
+                               let manifest = self.state.manifest.read().await;
+                               if let Some(manifest) = manifest.as_ref() {
+                                   if let Some(m_def) = manifest.macros.get(name) {
+                                       let target_uri = Url::from_file_path(&m_def.path).unwrap();
+                                       return Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                                           uri: target_uri,
+                                           range: Range {
+                                               start: Position::new(m_def.line as u32, 0),
+                                               end: Position::new(m_def.line as u32, 0),
+                                           },
+                                       })));
+                                   }
+                               }
+                          }
                       }
                  }
              }
@@ -227,23 +260,53 @@ impl LanguageServer for Backend {
         let uri = params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
         
+        self.client.log_message(MessageType::LOG, format!("Hover request at Line: {}, Col: {}", position.line, position.character)).await;
+
         if let Some(doc) = self.state.documents.get(&uri) {
              let char_idx = doc.text.line_to_char(position.line as usize) + position.character as usize;
              let byte_idx = doc.text.char_to_byte(char_idx);
+             eprintln!("HOVER DEBUG: byte_idx={}, refs={}", byte_idx, doc.refs.len());
 
              for (dbt_ref, range) in &doc.refs {
-                 if byte_idx >= range.start && byte_idx <= range.end {
-                      let contents = match dbt_ref {
+                 if byte_idx >= range.start && byte_idx < range.end {
+                      let value = match dbt_ref {
                           crate::jinja::DbtRef::Model(name) => {
-                               format!("**Model**: `{}`", name)
+                               let manifest = self.state.manifest.read().await;
+                               if let Some(m) = manifest.as_ref() {
+                                   if m.seeds.contains_key(name) {
+                                       format!("**Seed**: `{}`", name)
+                                   } else {
+                                       format!("**Model**: `{}`", name)
+                                   }
+                               } else {
+                                   format!("**Model**: `{}`", name)
+                               }
                           },
                           crate::jinja::DbtRef::Source(src, tbl) => {
                                format!("**Source**: `{}.{}`", src, tbl)
+                          },
+                          crate::jinja::DbtRef::Macro(name) => {
+                               let manifest = self.state.manifest.read().await;
+                               let mut msg = format!("**Macro**: `{}`", name);
+                               if let Some(manifest) = manifest.as_ref() {
+                                   if let Some(m_def) = manifest.macros.get(name) {
+                                       if let Ok(content) = std::fs::read_to_string(&m_def.path) {
+                                           let macro_lines: Vec<&str> = content.lines().skip(m_def.line).take(15).collect();
+                                           msg.push_str("\n\n```jinja\n");
+                                           msg.push_str(&macro_lines.join("\n"));
+                                           msg.push_str("\n```");
+                                       }
+                                   }
+                               }
+                               msg
                           }
                       };
                       
                       return Ok(Some(Hover {
-                          contents: HoverContents::Scalar(MarkedString::String(contents)),
+                          contents: HoverContents::Markup(MarkupContent {
+                              kind: MarkupKind::Markdown,
+                              value,
+                          }),
                           range: None,
                       }));
                  }
@@ -293,7 +356,14 @@ impl LanguageServer for Backend {
 
 #[tokio::main]
 async fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--test") {
+        eprintln!("dbt-lsp binary check: OK");
+        return;
+    }
+
     env_logger::init();
+    eprintln!("dbt-lsp starting...");
 
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();

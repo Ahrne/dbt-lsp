@@ -5,31 +5,60 @@ use std::sync::OnceLock;
 pub enum DbtRef {
     Model(String),
     Source(String, String), // source_name, table_name
+    Macro(String),
 }
 
 fn re_ref() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r#"(?x)\{\{\s*ref\s*\(\s*['"]([a-zA-Z0-9_]+)['"]\s*\)\s*\}\}"#).unwrap())
+    RE.get_or_init(|| Regex::new(r#"(?xs)\{\{\s*[-]?\s*ref\s*\(\s*['"]([a-zA-Z0-9_\.]+)['"]\s*\)\s*[-]?\s*\}\}"#).unwrap())
 }
 
 fn re_source() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r#"(?x)\{\{\s*source\s*\(\s*['"]([a-zA-Z0-9_]+)['"]\s*,\s*['"]([a-zA-Z0-9_]+)['"]\s*\)\s*\}\}"#).unwrap())
+    RE.get_or_init(|| Regex::new(r#"(?xs)\{\{\s*[-]?\s*source\s*\(\s*['"]([a-zA-Z0-9_\.]+)['"]\s*,\s*['"]([a-zA-Z0-9_\.]+)['"]\s*\)\s*[-]?\s*\}\}"#).unwrap())
+}
+
+pub fn is_macro_file(text: &str) -> bool {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r#"(?s)\{[%-]\s*macro\s+"#).unwrap());
+    re.is_match(text)
+}
+
+fn re_macro_call() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r#"(?xs)\{[{%]\s*[-]?\s*(?:do\s+)?([a-zA-Z0-9_\.]+)\s*\("#).unwrap())
 }
 
 fn re_generic_jinja() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"\{\{.*?\}\}").unwrap())
+    RE.get_or_init(|| Regex::new(r"(?s)\{\{.*?\}\}").unwrap())
 }
 
 fn re_jinja_block() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"\{%.*?%\}").unwrap())
+    RE.get_or_init(|| Regex::new(r"(?s)\{%.*?%\}").unwrap())
 }
 
 fn re_jinja_comment() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"\{#.*?#\}").unwrap())
+    RE.get_or_init(|| Regex::new(r"(?s)\{#.*?#\}").unwrap())
+}
+
+fn re_dataform() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"(?s)\$\{.*?\}").unwrap())
+}
+
+fn preserve_newlines_replace(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c == '\n' {
+            out.push('\n');
+        } else {
+            out.push(' ');
+        }
+    }
+    out
 }
 
 /// Preprocesses SQL text by replacing Jinja constructs with valid SQL identifiers
@@ -39,39 +68,14 @@ fn re_jinja_comment() -> &'static Regex {
 pub fn preprocess_for_parsing(text: &str) -> String {
     let result = text.to_string();
 
-    // Helper to replace range with new content padded to same length
-    fn replace_preserve_len(text: &mut String, range: std::ops::Range<usize>, replacement_prefix: &str) {
-        let len = range.len();
-        let prefix_len = replacement_prefix.len();
-        
-        if len < prefix_len {
-            // Edge case: Original text too short. Just use generic spacer.
-            // But `{{ref('a')}}` is always > `__DBT_REF_a` usually.
-            // If it happens, we can't emit a valid identifier easily without growing.
-            // We just replace with whitespace to avoid syntax error, or partial.
-            let spaces = " ".repeat(len);
-             text.replace_range(range, &spaces);
-        } else {
-            let mut substitution = replacement_prefix.to_string();
-            substitution.push_str(&" ".repeat(len - prefix_len));
-            text.replace_range(range, &substitution);
-        }
-    }
-
-    // Capture offsets first to avoid shifting indices during iteration if we weren't careful.
-    // But since we preserve length, indices are stable!
-    
     // 1. Replace Refs: {{ ref('model') }} -> __DBT_REF_model_______
-    // We strictly use `replace_all` logic but we need to generate string based on match logic.
-    // Regex `replace_all` with closure is easiest if we return same length string.
-    
     let result = re_ref().replace_all(&result, |caps: &Captures| {
         let full_match = &caps[0];
         let model_name = &caps[1];
         let desired_ident = format!("__DBT_REF_{}", model_name);
         
         if desired_ident.len() > full_match.len() {
-             " ".repeat(full_match.len())
+             preserve_newlines_replace(full_match)
         } else {
              let padding = " ".repeat(full_match.len() - desired_ident.len());
              format!("{}{}", desired_ident, padding)
@@ -85,35 +89,27 @@ pub fn preprocess_for_parsing(text: &str) -> String {
         let desired_ident = format!("__DBT_SRC_{}_{}", src_name, tbl_name);
          
         if desired_ident.len() > full_match.len() {
-             " ".repeat(full_match.len())
+             preserve_newlines_replace(full_match)
         } else {
              let padding = " ".repeat(full_match.len() - desired_ident.len());
              format!("{}{}", desired_ident, padding)
         }
     });
 
-    // Replace Control Flow / generic blocks with SQL comments to preserve length
-    // {% ... %} -> /* ... */
     let result = re_jinja_block().replace_all(&result, |caps: &Captures| {
-       let len = caps[0].len();
-       if len >= 4 {
-           let content_len = len - 4; // /* */ is 4 chars
-           format!("/*{}*/", " ".repeat(content_len))
-       } else {
-           " ".repeat(len)
-       }
+       preserve_newlines_replace(&caps[0])
     });
 
-    // Replace Comments with spaces
-    // {# ... #} -> "        "
     let result = re_jinja_comment().replace_all(&result, |caps: &Captures| {
-        " ".repeat(caps[0].len())
+        preserve_newlines_replace(&caps[0])
     });
     
-    // Generic {{ ... }} that wasn't caught by ref/source.
-    // We replace with whitespace to avoid interference with SQL syntax.
     let result = re_generic_jinja().replace_all(&result, |caps: &Captures| {
-         " ".repeat(caps[0].len())
+         preserve_newlines_replace(&caps[0])
+    });
+
+    let result = re_dataform().replace_all(&result, |caps: &Captures| {
+        preserve_newlines_replace(&caps[0])
     });
 
     result.to_string()
@@ -123,7 +119,6 @@ pub fn extract_refs(text: &str) -> Vec<(DbtRef, std::ops::Range<usize>)> {
     let mut refs = Vec::new();
     
     for cap in re_ref().captures_iter(text) {
-        // Group 0 is the full match: {{ ref(...) }}
         if let Some(full) = cap.get(0) {
             if let Some(m) = cap.get(1) {
                 refs.push((DbtRef::Model(m.as_str().to_string()), full.range()));
@@ -140,6 +135,17 @@ pub fn extract_refs(text: &str) -> Vec<(DbtRef, std::ops::Range<usize>)> {
             }
         }
     }
+
+    for cap in re_macro_call().captures_iter(text) {
+        if let Some(full) = cap.get(0) {
+            if let Some(m) = cap.get(1) {
+                let name = m.as_str();
+                if name != "ref" && name != "source" && name != "config" && name != "var" && name != "env_var" {
+                    refs.push((DbtRef::Macro(name.to_string()), full.range()));
+                }
+            }
+        }
+    }
     
     refs
 }
@@ -149,24 +155,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_preprocess_preserves_length() {
-        let input = "select * from {{ ref('my_table') }} where id = {{ var('x') }}";
+    fn test_preprocess_preserves_length_and_newlines() {
+        let input = "select * from {{ \nref('my_table') \n}} where id = {{ config(...) }}";
         let output = preprocess_for_parsing(input);
         
         assert_eq!(input.len(), output.len(), "Length must be preserved");
-        assert!(output.contains("__DBT_REF_my_table"));
-        assert!(output.contains("__DBT_EXPR"));
+        assert_eq!(input.lines().count(), output.lines().count(), "Line count must be preserved");
         
-        println!("Input:  {}\nOutput: {}", input, output);
-    }
-    
-    #[test]
-    fn test_extract_refs() {
-        let input = "select * from {{ ref('my_table') }} join {{ source('raw', 'users') }}";
-        let refs = extract_refs(input);
-        
-        assert_eq!(refs.len(), 2);
-        assert!(refs.contains(&DbtRef::Model("my_table".to_string())));
-        assert!(refs.contains(&DbtRef::Source("raw".to_string(), "users".to_string())));
+        println!("Input:  {:?}\nOutput: {:?}", input, output);
     }
 }

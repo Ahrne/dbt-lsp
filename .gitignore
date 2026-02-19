@@ -2,3 +2,7 @@
 /build_output
 /build_debug
 /tmp
+.cargo_home
+/debug_binaries
+hello*
+src/target_junk
